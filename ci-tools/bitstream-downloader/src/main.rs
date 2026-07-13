@@ -69,9 +69,9 @@ struct BundleManifestArgs {
     #[arg(long)]
     github_pr: Option<u32>,
 
-    /// Path to the XSA file (optional)
+    /// Path to the XSA file
     #[arg(long)]
-    xsa_file: Option<PathBuf>,
+    xsa_file: PathBuf,
 
     /// Path to the PDI file (optional)
     #[arg(long)]
