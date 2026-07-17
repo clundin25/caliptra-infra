@@ -17,7 +17,7 @@ use tokio::fs::{self, File};
 pub const MANIFEST_SCHEMA_VERSION: &str = "1";
 pub const OUTPUT_BUNDLE_FILENAME: &str = "caliptra-bitstream.tar.gz";
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Manifest {
     pub schema_version: String,
     pub repository: String,
@@ -62,9 +62,16 @@ impl Manifest {
     }
 
     pub fn to_toml(&self) -> Result<String> {
+        let mut manifest = self.clone();
+        if let Some(url) = &mut manifest.xsa_url {
+            *url = url.replace("/projects/_/buckets/", "/");
+        }
+        if let Some(url) = &mut manifest.pdi_url {
+            *url = url.replace("/projects/_/buckets/", "/");
+        }
         Ok(format!(
             "# Licensed under the Apache-2.0 license\n{}",
-            toml::to_string(self).context("failed to serialize manifest to TOML")?
+            toml::to_string(&manifest).context("failed to serialize manifest to TOML")?
         ))
     }
 }
@@ -84,7 +91,7 @@ async fn upload_content_to_gcs(
 ) -> Result<String> {
     let object_name = format!("v{MANIFEST_SCHEMA_VERSION}/{commit_hash}/{object_name}");
     let client = Storage::builder().build().await?;
-    let response = client
+    client
         .write_object(
             format!("projects/_/buckets/{bucket}"),
             &object_name,
@@ -94,7 +101,7 @@ async fn upload_content_to_gcs(
         .await?;
     let public_url = format!(
         "https://storage.googleapis.com/{}/{}",
-        bucket, response.name
+        bucket, object_name
     );
     println!("Uploaded {} to: {}", &object_name, public_url);
     Ok(public_url)
@@ -431,6 +438,19 @@ mod tests {
         assert!(extract_dir.join("system.xsa").exists());
         assert!(extract_dir.join("subsystem.pdi").exists());
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_manifest_to_toml_sanitizes_urls() -> Result<()> {
+        let mut manifest = test_manifest();
+        manifest.xsa_url = Some("https://storage.googleapis.com/my-bucket/_/buckets/v1/hash/system.xsa".to_string());
+        manifest.pdi_url = Some("https://storage.googleapis.com/my-bucket/_/buckets/v1/hash/subsystem.pdi".to_string());
+
+        let toml_str = manifest.to_toml()?;
+        assert!(!toml_str.contains("/_/buckets/"));
+        assert!(toml_str.contains("https://storage.googleapis.com/my-bucket/v1/hash/system.xsa"));
+        assert!(toml_str.contains("https://storage.googleapis.com/my-bucket/v1/hash/subsystem.pdi"));
         Ok(())
     }
 }
