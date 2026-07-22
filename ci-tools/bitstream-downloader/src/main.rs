@@ -69,13 +69,17 @@ struct BundleManifestArgs {
     #[arg(long)]
     github_pr: Option<u32>,
 
-    /// Path to the XSA file
+    /// Path to the XSA file (optional)
     #[arg(long)]
-    xsa_file: PathBuf,
+    xsa_file: Option<PathBuf>,
 
     /// Path to the PDI file (optional)
     #[arg(long)]
     pdi_file: Option<PathBuf>,
+
+    /// Path to the BIN file (optional)
+    #[arg(long)]
+    bin_file: Option<PathBuf>,
 
     /// Output directory for the bundled .tar.gz
     #[arg(long)]
@@ -118,13 +122,16 @@ async fn main() -> Result<()> {
                 name: None,
                 xsa_url: None,
                 pdi_url: None,
+                bin_url: None,
                 xsa_hash: None,
                 pdi_hash: None,
+                bin_hash: None,
             };
             caliptra_bitstream_downloader::create_manifest_bundle(
                 manifest,
                 args.xsa_file,
                 args.pdi_file,
+                args.bin_file,
                 args.output_dir,
             )
             .await?;

@@ -40,9 +40,13 @@ pub struct Manifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pdi_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub bin_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub xsa_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pdi_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bin_hash: Option<String>,
 }
 
 impl Manifest {
@@ -67,6 +71,9 @@ impl Manifest {
             *url = url.replace("/projects/_/buckets/", "/");
         }
         if let Some(url) = &mut manifest.pdi_url {
+            *url = url.replace("/projects/_/buckets/", "/");
+        }
+        if let Some(url) = &mut manifest.bin_url {
             *url = url.replace("/projects/_/buckets/", "/");
         }
         Ok(format!(
@@ -115,11 +122,15 @@ pub async fn download_bitstream(manifest_path: &Path) -> Result<PathBuf> {
     {
         (url, hash, "pdi")
     } else if let (Some(url), Some(hash)) =
+        (manifest.bin_url.as_deref(), manifest.bin_hash.as_deref())
+    {
+        (url, hash, "bin")
+    } else if let (Some(url), Some(hash)) =
         (manifest.xsa_url.as_deref(), manifest.xsa_hash.as_deref())
     {
         (url, hash, "xsa")
     } else {
-        bail!("Manifest is missing both 'pdi_url' and 'xsa_url' fields for download");
+        bail!("Manifest is missing 'pdi_url', 'bin_url', and 'xsa_url' fields for download");
     };
 
     // Use the name from the manifest if available, otherwise default to a generic name
@@ -157,8 +168,20 @@ pub async fn download_bitstream(manifest_path: &Path) -> Result<PathBuf> {
     }
     println!("Hash verification successful!");
 
-    let output_filename = format!("{}.{}", manifest.caliptra_variant, extension);
-    let output_path = PathBuf::from(&output_filename);
+    let output_path = if extension == "bin" {
+        PathBuf::from("./caliptra_build/caliptra_fpga.bin")
+    } else {
+        PathBuf::from(format!("{}.{}", manifest.caliptra_variant, extension))
+    };
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent)
+                .await
+                .context("failed to create output directory")?;
+        }
+    }
+
     let mut file = fs::File::create(&output_path)
         .await
         .context("failed to create output file")?;
@@ -167,7 +190,7 @@ pub async fn download_bitstream(manifest_path: &Path) -> Result<PathBuf> {
     file.write_all(&bytes)
         .await
         .context("failed to write output file")?;
-    println!("File saved to: {}", output_filename);
+    println!("File saved to: {}", output_path.display());
     Ok(output_path)
 }
 
@@ -182,8 +205,9 @@ fn add_file_to_tar<W: io::Write>(tar: &mut TarBuilder<W>, path: &Path) -> Result
 
 pub async fn create_manifest_bundle(
     manifest: Manifest,
-    xsa_path: PathBuf,
+    xsa_path: Option<PathBuf>,
     pdi_path: Option<PathBuf>,
+    bin_path: Option<PathBuf>,
     output_dir: PathBuf,
 ) -> Result<PathBuf> {
     let mut manifest = manifest;
@@ -193,8 +217,8 @@ pub async fn create_manifest_bundle(
         anyhow::bail!("{} did not exist!", output_dir.display());
     }
 
-    if !xsa_path.exists() {
-        anyhow::bail!("XSA file does not exist: {}", xsa_path.display());
+    if xsa_path.is_none() && pdi_path.is_none() && bin_path.is_none() {
+        anyhow::bail!("At least one bitstream file (XSA, PDI, or BIN) must be provided");
     }
 
     let output_bundle_path = output_dir.join(OUTPUT_BUNDLE_FILENAME);
@@ -207,13 +231,25 @@ pub async fn create_manifest_bundle(
             let enc = GzEncoder::new(file, Compression::default());
             let mut tar = TarBuilder::new(enc);
 
-            manifest.xsa_hash = Some(add_file_to_tar(&mut tar, &xsa_path)?);
+            if let Some(xsa_path) = xsa_path {
+                if !xsa_path.exists() {
+                    anyhow::bail!("XSA file specified but does not exist: {}", xsa_path.display());
+                }
+                manifest.xsa_hash = Some(add_file_to_tar(&mut tar, &xsa_path)?);
+            }
 
             if let Some(pdi_path) = pdi_path {
                 if !pdi_path.exists() {
                     anyhow::bail!("PDI file specified but does not exist: {}", pdi_path.display());
                 }
                 manifest.pdi_hash = Some(add_file_to_tar(&mut tar, &pdi_path)?);
+            }
+
+            if let Some(bin_path) = bin_path {
+                if !bin_path.exists() {
+                    anyhow::bail!("BIN file specified but does not exist: {}", bin_path.display());
+                }
+                manifest.bin_hash = Some(add_file_to_tar(&mut tar, &bin_path)?);
             }
 
             let manifest_toml = manifest.to_toml()?;
@@ -298,22 +334,30 @@ pub async fn upload_manifest_bundle(bundle_path: &Path, gcs_bucket: &str) -> Res
     let manifest_path = tmp_dir.path().join("manifest.toml");
     let mut manifest = Manifest::load_from_path(&manifest_path).await?;
 
-    let xsa_file = find_file_with_extension(tmp_dir.path(), "xsa")
-        .await?
-        .context("Manifest bundle is missing required XSA file")?;
+    let xsa_file = find_file_with_extension(tmp_dir.path(), "xsa").await?;
     let pdi_file = find_file_with_extension(tmp_dir.path(), "pdi").await?;
+    let bin_file = find_file_with_extension(tmp_dir.path(), "bin").await?;
 
-    println!("Found XSA file in tarball: {}", xsa_file.display());
-    if let Some(file) = &pdi_file {
-        println!("Found PDI file in tarball: {}", file.display());
+    if xsa_file.is_none() && pdi_file.is_none() && bin_file.is_none() {
+        anyhow::bail!("Manifest bundle is missing required bitstream file (XSA, PDI, or BIN)");
     }
 
-    manifest.xsa_url =
-        Some(upload_component_to_gcs(&xsa_file, gcs_bucket, &manifest.commit_hash).await?);
+    if let Some(file) = &xsa_file {
+        println!("Found XSA file in tarball: {}", file.display());
+        manifest.xsa_url =
+            Some(upload_component_to_gcs(file, gcs_bucket, &manifest.commit_hash).await?);
+    }
 
-    if let Some(file) = pdi_file {
+    if let Some(file) = &pdi_file {
+        println!("Found PDI file in tarball: {}", file.display());
         manifest.pdi_url =
-            Some(upload_component_to_gcs(&file, gcs_bucket, &manifest.commit_hash).await?);
+            Some(upload_component_to_gcs(file, gcs_bucket, &manifest.commit_hash).await?);
+    }
+
+    if let Some(file) = &bin_file {
+        println!("Found BIN file in tarball: {}", file.display());
+        manifest.bin_url =
+            Some(upload_component_to_gcs(file, gcs_bucket, &manifest.commit_hash).await?);
     }
 
     manifest.name = Some(format!("{}-bitstream", manifest.caliptra_variant));
@@ -358,8 +402,10 @@ mod tests {
             name: None,
             xsa_url: None,
             pdi_url: None,
+            bin_url: None,
             xsa_hash: None,
             pdi_hash: None,
+            bin_hash: None,
         }
     }
 
@@ -374,7 +420,8 @@ mod tests {
 
         let bundle_path = create_manifest_bundle(
             test_manifest(),
-            xsa_path,
+            Some(xsa_path),
+            None,
             None,
             output_dir.clone(),
         )
@@ -414,8 +461,9 @@ mod tests {
 
         let bundle_path = create_manifest_bundle(
             test_manifest(),
-            xsa_path,
+            Some(xsa_path),
             Some(pdi_path),
+            None,
             output_dir.clone(),
         )
         .await?;
@@ -441,16 +489,57 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_create_manifest_bundle_bin_only() -> Result<()> {
+        let tmp_dir = tempfile::tempdir()?;
+        let bin_path = tmp_dir.path().join("caliptra_fpga.bin");
+        std::fs::File::create(&bin_path)?.write_all(b"dummy bin content")?;
+
+        let output_dir = tmp_dir.path().join("output");
+        std::fs::create_dir(&output_dir)?;
+
+        let bundle_path = create_manifest_bundle(
+            test_manifest(),
+            None,
+            None,
+            Some(bin_path),
+            output_dir.clone(),
+        )
+        .await?;
+
+        assert!(bundle_path.exists());
+
+        // Extract tar.gz and verify contents
+        let extract_dir = tmp_dir.path().join("extract");
+        let tar_gz = std::fs::File::open(&bundle_path)?;
+        let tar = GzDecoder::new(tar_gz);
+        let mut archive = TarArchive::new(tar);
+        archive.unpack(&extract_dir)?;
+
+        let manifest_path = extract_dir.join("manifest.toml");
+        assert!(manifest_path.exists());
+        let unpacked_manifest = Manifest::load_from_path(&manifest_path).await?;
+
+        assert!(unpacked_manifest.bin_hash.is_some());
+        assert!(unpacked_manifest.xsa_hash.is_none());
+        assert!(unpacked_manifest.pdi_hash.is_none());
+        assert!(extract_dir.join("caliptra_fpga.bin").exists());
+
+        Ok(())
+    }
+
     #[test]
     fn test_manifest_to_toml_sanitizes_urls() -> Result<()> {
         let mut manifest = test_manifest();
-        manifest.xsa_url = Some("https://storage.googleapis.com/my-bucket/_/buckets/v1/hash/system.xsa".to_string());
-        manifest.pdi_url = Some("https://storage.googleapis.com/my-bucket/_/buckets/v1/hash/subsystem.pdi".to_string());
+        manifest.xsa_url = Some("https://storage.googleapis.com/my-bucket/projects/_/buckets/v1/hash/system.xsa".to_string());
+        manifest.pdi_url = Some("https://storage.googleapis.com/my-bucket/projects/_/buckets/v1/hash/subsystem.pdi".to_string());
+        manifest.bin_url = Some("https://storage.googleapis.com/my-bucket/projects/_/buckets/v1/hash/caliptra_fpga.bin".to_string());
 
         let toml_str = manifest.to_toml()?;
         assert!(!toml_str.contains("/_/buckets/"));
         assert!(toml_str.contains("https://storage.googleapis.com/my-bucket/v1/hash/system.xsa"));
         assert!(toml_str.contains("https://storage.googleapis.com/my-bucket/v1/hash/subsystem.pdi"));
+        assert!(toml_str.contains("https://storage.googleapis.com/my-bucket/v1/hash/caliptra_fpga.bin"));
         Ok(())
     }
 }
