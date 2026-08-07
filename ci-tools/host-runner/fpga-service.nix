@@ -22,7 +22,7 @@ let
       enableService ? true,
     }:
     {
-      systemd.user.services."${name}" = {
+      systemd.services."${name}" = {
         enable = enableService;
         description = "${name} Service";
         after = [ "network.target" ];
@@ -39,6 +39,7 @@ let
             ''IDENTIFIER="${name}"''
             ''FPGA_TARGET=""${target}""''
             ''IMAGE="${image}"''
+            ''HOME="/home/${user}"''
           ];
         };
       };
