@@ -116,14 +116,38 @@ rec {
     done
   '';
 
+  start-all-fpga-jobs = pkgs.writeShellScriptBin "start-all-fpga-jobs" ''
+    #!${pkgs.bash}/bin/bash
+    set -euo pipefail
+
+    echo "Starting FPGA-related systemd services (containing 'zcu' or 'vck')"
+
+    # Get all system services containing zcu or vck, active or inactive
+    services=$(sudo systemctl list-units --type=service --all --no-legend | awk '{print $1}' | grep -E 'zcu|vck' || true)
+
+    if [[ -z "$services" ]]; then
+      echo "No matching services found."
+      exit 0
+    fi
+
+    echo "The following services will be started:"
+    echo "$services" | sed 's/^/  * /'
+
+    # Use xargs to pass the services to the start command.
+    # The -r flag ensures systemctl isn't run if no services are found.
+    echo "$services" | xargs -r sudo systemctl start
+
+    echo "Start command sent."
+  '';
+
   restart-all-fpga-jobs = pkgs.writeShellScriptBin "restart-all-fpga-jobs" ''
     #!${pkgs.bash}/bin/bash
     set -euo pipefail
 
     echo "Restarting FPGA-related systemd services (containing 'zcu' or 'vck')"
 
-    # Get all user services containing zcu or vck, active or inactive
-    services=$(systemctl --user list-units --type=service --all --no-legend | awk '{print $1}' | grep -E 'zcu|vck' || true)
+    # Get all system services containing zcu or vck, active or inactive
+    services=$(sudo systemctl list-units --type=service --all --no-legend | awk '{print $1}' | grep -E 'zcu|vck' || true)
 
     if [[ -z "$services" ]]; then
       echo "No matching services found."
@@ -135,7 +159,7 @@ rec {
 
     # Use xargs to pass the services to the restart command.
     # The -r flag ensures systemctl isn't run if no services are found.
-    echo "$services" | xargs -r systemctl --user restart
+    echo "$services" | xargs -r sudo systemctl restart
 
     echo "Restart command sent."
   '';

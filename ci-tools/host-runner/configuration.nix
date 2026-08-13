@@ -61,7 +61,7 @@ in
   services.openssh.enable = true;
   services.openssh.settings.PasswordAuthentication = false;
 
-  security.sudo.wheelNeedsPassword = true;
+  security.sudo.wheelNeedsPassword = false;
 
   users.mutableUsers = false;
   users.users."${user}" = {
@@ -74,9 +74,7 @@ in
       "tty"
     ];
 
-    # The fpga ci runner services are defined as systemd user services.
-    # These services are first started when the user is logged in.
-    # To start them on boot, enable lingering (loginctl enable-linger).
+    # The fpga ci runner services are defined as systemd system services.
     linger = true;
 
     # Add your SSH public key here to gain SSH access to the host runner.
@@ -102,6 +100,7 @@ in
     scripts.sync-images
     scripts.download-image
     scripts.usb-setup
+    scripts."start-all-fpga-jobs"
     scripts."restart-all-fpga-jobs"
     scripts."stop-all-fpga-jobs"
     scripts."resume-all-fpga-jobs"
